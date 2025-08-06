@@ -10,7 +10,8 @@ class SpikingNeuralNetwork(nn.Module):
     """
 
     def __init__(self, input_size=700, hidden_size=128, output_size=10,
-                 num_layers=1, recurrent=False, dt=1e-3, T=100):
+                 num_layers=1, recurrent=False, dt=1e-3, T=100,
+                 reg_strength=1e-7):
         super(SpikingNeuralNetwork, self).__init__()
 
         self.input_size = input_size
@@ -20,6 +21,7 @@ class SpikingNeuralNetwork(nn.Module):
         self.recurrent = recurrent
         self.dt = dt
         self.T = T
+        self.reg_strength = reg_strength
 
         self.layers = nn.ModuleList()
 
@@ -37,6 +39,12 @@ class SpikingNeuralNetwork(nn.Module):
 
         self.readout = nn.Linear(hidden_size, output_size)
 
+        tau_syn = 5e-3
+        tau_mem = 10e-3
+        effective_dt = 1e-3
+        self.alpha = math.exp(-effective_dt / tau_syn)
+        self.beta = math.exp(-effective_dt / tau_mem)
+
     def forward(self, spike_trains):
         """
         Forward pass through the spiking network
@@ -49,6 +57,9 @@ class SpikingNeuralNetwork(nn.Module):
         spike_states = []
 
         for i, layer in enumerate(self.layers):
+
+            layer.reset_spike_counts()
+
             membrane_potentials.append(torch.zeros(
                 batch_size, layer.output_size, device=spike_trains.device))
             synaptic_currents.append(torch.zeros(
@@ -56,14 +67,9 @@ class SpikingNeuralNetwork(nn.Module):
             spike_states.append(torch.zeros(
                 batch_size, layer.output_size, device=spike_trains.device))
 
-        readout_potential = torch.zeros(
-            batch_size, self.output_size, device=spike_trains.device)
-        tau_readout = 20e-3
-        lambda_readout = math.exp(-self.dt / tau_readout)
+        all_spikes = []
 
-        # Store outputs for max-over-time loss
-        readout_potentials = []
-
+        # Forward pass through time
         for t in range(time_steps):
             current_input = spike_trains[:, t, :]
 
@@ -82,13 +88,48 @@ class SpikingNeuralNetwork(nn.Module):
                     layer_input, membrane_potentials[i], synaptic_currents[i], recurrent_input
                 )
 
-            readout_input = self.readout(spike_states[-1])
-            readout_potential = lambda_readout * readout_potential + \
-                (1 - lambda_readout) * readout_input
-            readout_potentials.append(readout_potential.clone())
+            all_spikes.append(spike_states[-1].clone())
 
-        # Stack readout potentials and return for max-over-time loss
-        # (batch_size, time_steps, output_size)
-        readout_potentials = torch.stack(readout_potentials, dim=1)
+        spk_rec = torch.stack(all_spikes, dim=1)  # (batch, time, hidden)
 
-        return readout_potentials
+        h2 = torch.einsum("abc,cd->abd", spk_rec, self.readout.weight.T)
+
+        flt = torch.zeros(batch_size, self.output_size,
+                          device=spike_trains.device)
+        out = torch.zeros(batch_size, self.output_size,
+                          device=spike_trains.device)
+        out_rec = [out.clone()]
+
+        for t in range(time_steps):
+            new_flt = self.alpha * flt + h2[:, t]
+            new_out = self.beta * out + flt
+
+            flt = new_flt
+            out = new_out
+            out_rec.append(out.clone())
+
+        readout_potentials = torch.stack(out_rec, dim=1) + self.readout.bias
+
+        reg_loss = self.compute_spike_regularization()
+
+        return readout_potentials, reg_loss
+
+    def compute_spike_regularization(self):
+        """
+        Paper's exact regularization implementation
+        """
+        total_reg_loss = 0.0
+
+        for layer in self.layers:
+            if len(layer.spike_counts) == 0:
+                continue
+
+            spks = torch.stack(layer.spike_counts, dim=0)
+
+            l1_loss = self.reg_strength * torch.mean(spks)
+            l2_loss = self.reg_strength * \
+                torch.mean(torch.sum(torch.sum(spks, dim=0), dim=0)**2)
+
+            total_reg_loss += l1_loss + l2_loss
+
+        return total_reg_loss

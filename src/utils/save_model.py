@@ -7,7 +7,6 @@ def save_model_checkpoint(model, optimizer, epoch, loss, accuracy, model_name, c
     """
     Save a comprehensive checkpoint for any model
     """
-    os.makedirs(checkpoint_dir, exist_ok=True)
 
     checkpoint = {
         'model_name': model_name,
@@ -27,15 +26,11 @@ def save_model_checkpoint(model, optimizer, epoch, loss, accuracy, model_name, c
         }
     }
 
-    checkpoint_path = os.path.join(
-        checkpoint_dir, f'{model_name}_epoch_{epoch}.pth')
-    torch.save(checkpoint, checkpoint_path)
-
     best_path = os.path.join(checkpoint_dir, f'{model_name}_best.pth')
     torch.save(checkpoint, best_path)
 
-    print(f"✅ Checkpoint saved: {checkpoint_path}")
-    return checkpoint_path
+    print(f"✅ Checkpoint saved: {best_path}")
+    return best_path
 
 
 def save_all_models_checkpoints(models, optimizers, epoch, losses, accuracies, checkpoint_dir='../models/checkpoints'):

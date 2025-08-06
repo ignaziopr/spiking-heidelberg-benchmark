@@ -3,7 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from models.architectures.lif_neuron import LIFNeuron
-from models.architectures.surrogate_gradient import SurrogateGradient
 
 
 class SpikingLayer(nn.Module):
@@ -25,20 +24,20 @@ class SpikingLayer(nn.Module):
                 torch.randn(output_size, output_size))
 
         self.lif = LIFNeuron(dt=dt)
-        self.surrogate = SurrogateGradient.apply
 
         self.reset_parameters()
 
+        self.spike_counts = []
+
     def reset_parameters(self):
-        # Kaiming uniform initialization (Section II-D3)
-        k = 1.0 / self.input_size
-        bound = math.sqrt(k)
-        nn.init.uniform_(self.weight, -bound, bound)
+        weight_scale = 0.2
+
+        nn.init.normal_(self.weight, mean=0.0,
+                        std=weight_scale/math.sqrt(self.input_size))
 
         if self.recurrent:
-            k_rec = 1.0 / self.output_size
-            bound_rec = math.sqrt(k_rec)
-            nn.init.uniform_(self.recurrent_weight, -bound_rec, bound_rec)
+            nn.init.normal_(self.recurrent_weight, mean=0.0,
+                            std=weight_scale/math.sqrt(self.output_size))
 
     def forward(self, spike_input, membrane_potential, synaptic_current, spike_state=None):
 
@@ -47,10 +46,14 @@ class SpikingLayer(nn.Module):
         if self.recurrent and spike_state is not None:
             input_current += F.linear(spike_state, self.recurrent_weight)
 
-        new_membrane_potential, new_synaptic_current, raw_spikes = self.lif(
+        new_membrane_potential, new_synaptic_current, spikes = self.lif(
             input_current, membrane_potential, synaptic_current
         )
 
-        spikes = self.surrogate(new_membrane_potential - self.lif.u_thresh)
+        self.spike_counts.append(spikes)
 
         return new_membrane_potential, new_synaptic_current, spikes
+
+    def reset_spike_counts(self):
+        """Call at the start of each forward pass"""
+        self.spike_counts = []
